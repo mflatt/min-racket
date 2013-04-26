@@ -1,0 +1,3 @@
+This is an experiment to see what a minimal Racket could be, where
+"minimal" means `raco pkg' is included and install everything else as
+a package.
