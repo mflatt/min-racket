@@ -207,6 +207,7 @@
 (define (dependency->version dep)
   (cond
    [(string? dep) #f]
+   [(null? (cdr dep)) #f]
    [(keyword? (cadr dep))
     (dependency-lookup '#:version dep)]
    [else (cadr dep)]))
@@ -214,6 +215,7 @@
 (define (dependency-lookup kw dep)
   (cond
    [(string? dep) #f]
+   [(null? (cdr dep)) #f]
    [(keyword? (cadr dep))
     (define p (member kw (cdr dep)))
     (and p (cadr p))]
@@ -340,22 +342,31 @@
 (define (db-pkg-info pkg details?)
   (if details?
       (let ([tags (db:get-pkg-tags (db:pkg-name pkg)
-                                   (db:pkg-catalog pkg))])
+                                   (db:pkg-catalog pkg))]
+            [mods (db:get-pkg-modules (db:pkg-name pkg)
+                                      (db:pkg-catalog pkg)
+                                      (db:pkg-checksum pkg))]
+            [deps (db:get-pkg-dependencies (db:pkg-name pkg)
+                                           (db:pkg-catalog pkg)
+                                           (db:pkg-checksum pkg))])
         (hash 'name (db:pkg-name pkg)
               'author (db:pkg-author pkg)
               'source (db:pkg-source pkg)
               'checksum (db:pkg-checksum pkg)
               'description (db:pkg-desc pkg)
-              'tags tags))
+              'tags tags
+              'modules mods
+              'dependencies deps))
       (hash 'source (db:pkg-source pkg)
             'checksum (db:pkg-source pkg))))
 
-(define (remote-package-checksum pkg)
+(define (remote-package-checksum pkg download-printf)
   (match pkg
     [`(catalog ,pkg-name)
      (hash-ref (package-catalog-lookup pkg-name #f) 'checksum)]
     [`(url ,pkg-url-str)
-     (package-url->checksum pkg-url-str)]))
+     (package-url->checksum pkg-url-str 
+                            #:download-printf download-printf)]))
 
 (define (read-file-hash file)
   (define the-db
@@ -633,20 +644,20 @@
          (not (regexp-match? #rx"^github://" pkg)))
     ;; Add "github://github.com/"
     (stage-package/info (string-append "github://github.com/" pkg) type 
-                        pkg-name #:given-checksum given-checksum
+                        pkg-name 
+                        #:given-checksum given-checksum
                         check-sums? download-printf)]
    [(or (eq? type 'file-url) (eq? type 'dir-url) (eq? type 'github))
     (define pkg-url (string->url pkg))
     (define scheme (url-scheme pkg-url))
 
     (define orig-pkg `(url ,pkg))
-    (define checksum (remote-package-checksum orig-pkg))
+    (define checksum (or given-checksum
+                         (remote-package-checksum orig-pkg download-printf)))
     (define info
       (update-install-info-orig-pkg
        (match type
          ['github
-          (when given-checksum
-            (set! checksum given-checksum))
           (unless checksum
             (pkg-error 
              (~a "could not find checksum for github package source, which implies it doesn't exist\n"
@@ -688,6 +699,7 @@
                         (stage-package/info (path->string package-path)
                                             'dir
                                             pkg-name
+                                            #:given-checksum checksum
                                             check-sums?
                                             download-printf))
                      (λ ()
@@ -760,6 +772,7 @@
                  (stage-package/info package-path
                                      download-type
                                      pkg-name
+                                     #:given-checksum checksum
                                      check-sums?
                                      download-printf))
               (λ ()
@@ -839,6 +852,7 @@
              (stage-package/info pkg-dir
                                  'dir
                                  pkg-name
+                                 #:given-checksum checksum
                                  check-sums?
                                  download-printf)
              `(file ,(simple-form-path* pkg)))
@@ -910,6 +924,7 @@
          #:force? [force? #f]
          #:quiet? [quiet? #f]
          descs)
+  (define download-printf (if quiet? void printf))
   (define check-sums? (not ignore-checksums?))
   (define db (read-pkg-db))
   (define db+with-dbs
@@ -1119,7 +1134,7 @@
             ;; Try updates:
             (define update-pkgs (map car update-deps))
             (define (make-pre-succeed)
-              (let ([to-update (filter-map update-package update-pkgs)])
+              (let ([to-update (filter-map (update-package download-printf) update-pkgs)])
                 (λ () (for-each (compose (remove-package quiet?) pkg-desc-name) to-update))))
             (match (or dep-behavior
                        (if name?
@@ -1175,7 +1190,7 @@
   (define infos
     (for/list ([v (in-list descs)])
       (stage-package/info (pkg-desc-source v) (pkg-desc-type v) (pkg-desc-name v) 
-                          check-sums? (if quiet? void printf))))
+                          check-sums? download-printf)))
   (define setup-collects (get-setup-collects (map install-info-directory
                                                   (append old-infos infos))
                                              metadata-ns))
@@ -1244,7 +1259,7 @@
   (define ty (first orig-pkg))
   (not (member ty '(link dir file))))
 
-(define (update-package pkg-name)
+(define ((update-package download-printf) pkg-name)
   (match-define (pkg-info orig-pkg checksum auto?)
                 (package-info pkg-name))
   (match orig-pkg
@@ -1266,7 +1281,7 @@
                 pkg-name)]
     [`(,_ ,orig-pkg-source)
      (define new-checksum
-       (remote-package-checksum orig-pkg))
+       (remote-package-checksum orig-pkg download-printf))
      (and new-checksum
           (not (equal? checksum new-checksum))
           ;; FIXME: the type shouldn't be #f here; it should be
@@ -1283,6 +1298,7 @@
                     #:dep-behavior [dep-behavior #f]
                     #:deps? [deps? #f]
                     #:quiet? [quiet? #f])
+  (define download-printf (if quiet? void printf))
   (define metadata-ns (make-metadata-namespace))
   (define pkgs
     (cond
@@ -1294,7 +1310,7 @@
         in-pkgs)]
       [else
        in-pkgs]))
-  (define to-update (filter-map update-package pkgs))
+  (define to-update (filter-map (update-package download-printf) pkgs))
   (cond
     [(empty? to-update)
      (printf "No updates available\n")
@@ -1556,7 +1572,17 @@
       (for ([(k v) (in-hash details)])
         (define t (hash-ref v 'tags '()))
         (unless (null? t)
-          (db:set-pkg-tags! k "local" t))))]
+          (db:set-pkg-tags! k "local" t)))
+      (for ([(k v) (in-hash details)])
+        (define mods (hash-ref v 'modules '()))
+        (unless (null? mods)
+          (define cs (hash-ref v 'checksum ""))
+          (db:set-pkg-modules! k "local" cs mods)))
+      (for ([(k v) (in-hash details)])
+        (define deps (hash-ref v 'dependencies '()))
+        (unless (null? deps)
+          (define cs (hash-ref v 'checksum ""))
+          (db:set-pkg-dependencies! k "local" cs deps))))]
    [else
     (define pkg-path (build-path dest-path "pkg"))
     (make-directory* pkg-path)
@@ -1576,7 +1602,8 @@
 
 (define (pkg-catalog-show names 
                         #:all? [all? #f]
-                        #:only-names? [only-names? #f])
+                        #:only-names? [only-names? #f]
+                        #:modules? [modules? #f])
   (for ([name (in-list names)])
     (define-values (parsed-name type)
       (package-source->name+type name #f))
@@ -1612,7 +1639,40 @@
                   (string-titlecase (symbol->string key))
                   (if (list? v)
                       (apply ~a #:separator ", " v)
-                      v)))))]))
+                      v))))
+      (for ([key '(dependencies)])
+        (define v (hash-ref details key null))
+        (unless (null? v)
+          (printf " Dependencies:\n")
+          (for ([dep (in-list v)])
+            (define vers (dependency->version dep))
+            (define plat (dependency-lookup '#:platform dep))
+            (printf "  ~a~a~a\n"
+                    (dependency->name dep)
+                    (if vers
+                        (format " version ~a" vers)
+                        "")
+                    (if plat
+                        (format " on platform ~v" plat)
+                        "")))))
+      (when modules?
+        (printf "Modules:")
+        (for/fold ([col 72]) ([mod (in-list (hash-ref details 'modules null))])
+          (define pretty-mod (if (and (list? mod)
+                                      (= 2 (length mod))
+                                      (eq? (car mod) 'lib)
+                                      (regexp-match #rx"[.]rkt$" (cadr mod)))
+                                 (string->symbol (regexp-replace #rx"[.]rkt$" (cadr mod) ""))
+                                 mod))
+          (define mod-str (~a " " pretty-mod))
+          (define new-col (if ((+ col (string-length mod-str)) . > . 72)
+                              (begin
+                                (newline)
+                                0)
+                              col))
+          (display mod-str)
+          (+ new-col (string-length mod-str)))
+        (newline)))]))
 
 (define (get-all-pkg-names-from-catalogs)
   (define ht
@@ -1734,7 +1794,8 @@
 
 
 (define (pkg-catalog-update-local #:catalog-file [catalog-file (db:current-pkg-catalog-file)]
-                                  #:quiet? [quiet? #f])
+                                  #:quiet? [quiet? #f]
+                                  #:consult-packages? [consult-packages? #f])
   (parameterize ([db:current-pkg-catalog-file catalog-file])
     (define catalogs (pkg-config-catalogs))
     (db:set-catalogs! catalogs)
@@ -1742,28 +1803,40 @@
     (for ([catalog (in-list catalogs)])
       (parameterize ([current-pkg-catalogs (list (string->url catalog))])
         (define details (get-all-pkg-details-from-catalogs))
+        ;; set packages:
         (db:set-pkgs! catalog (for/list ([(name ht) (in-hash details)])
-                              (db:pkg name
-                                      catalog
-                                      (hash-ref ht 'author "")
-                                      (hash-ref ht 'source "")
-                                      (hash-ref ht 'checksum "")
-                                      (hash-ref ht 'description ""))))
-
-        (define need-modules (db:get-pkgs-without-modules #:catalog catalog))
-        (for ([(pkg) (in-list need-modules)])
-          (define name (db:pkg-name pkg))
-          (define ht (hash-ref details name))
-          (define source (hash-ref ht 'source))
-          (unless quiet?
-            (printf "Downloading ~s\n" source))
-          (define-values (checksum modules deps)
-            (get-pkg-content (pkg-desc source
-                                       #f 
-                                       (hash-ref ht 'checksum #f) 
-                                       #f)))
-          (db:set-pkg-modules! name catalog checksum modules))))))
-
+                                (db:pkg name
+                                        catalog
+                                        (hash-ref ht 'author "")
+                                        (hash-ref ht 'source "")
+                                        (hash-ref ht 'checksum "")
+                                        (hash-ref ht 'description ""))))
+        ;; Add available module and dependency info:
+        (for/list ([(name ht) (in-hash details)])
+          (define checksum (hash-ref ht 'checksum ""))
+          (define mods (hash-ref ht 'modules #f))
+          (when mods
+            (db:set-pkg-modules! name catalog checksum mods))
+          (define deps (hash-ref ht 'dependencies #f))
+          (when deps
+            (db:set-pkg-dependencies! name catalog checksum deps)))
+        (when consult-packages?
+          ;; If module information isn't available for a package, download
+          ;; the package to fill in that information:
+          (define need-modules (db:get-pkgs-without-modules #:catalog catalog))
+          (for ([(pkg) (in-list need-modules)])
+            (define name (db:pkg-name pkg))
+            (define ht (hash-ref details name))
+            (define source (hash-ref ht 'source))
+            (unless quiet?
+              (printf "Downloading ~s\n" source))
+            (define-values (checksum modules deps)
+              (get-pkg-content (pkg-desc source
+                                         #f 
+                                         (hash-ref ht 'checksum #f) 
+                                         #f)))
+            (db:set-pkg-modules! name catalog checksum modules)
+            (db:set-pkg-dependencies! name catalog checksum deps)))))))
 
 (define (choose-catalog-file)
   (define default (db:current-pkg-catalog-file))
@@ -1859,7 +1932,8 @@
   [pkg-catalog-show
    (->* ((listof string?))
         (#:all? boolean?
-                #:only-names? boolean?)
+                #:only-names? boolean?
+                #:modules? boolean?)
         void?)]
   [pkg-catalog-copy
    (->* ((listof path-string?) path-string?)
@@ -1888,7 +1962,8 @@
   [pkg-catalog-update-local
    (->* ()
         (#:catalog-file path-string?
-         #:quiet? boolean?)
+         #:quiet? boolean?
+         #:consult-packages? boolean?)
         void?)]
   [pkg-catalog-suggestions-for-module
    (->* (module-path?)

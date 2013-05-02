@@ -209,7 +209,7 @@
          v]
         [else
          (unless (pred? v)
-           (raise-blame-error blame v '(expected: "~a" given: "~e")
+           (raise-blame-error blame v '(expected: "~a?" given: "~e")
                               (base-struct/dc-struct-name ctc)
                               v))
          (let loop ([subcontracts (base-struct/dc-subcontracts ctc)]
@@ -815,7 +815,7 @@
   
   #`(build-struct/dc (list #,@structs)
                      #,(list-ref info 2)
-                     'struct-id
+                     '#,struct-id
                      (quote-module-name)
                      '#,struct-id
                      #,struct/c?))
@@ -888,7 +888,12 @@
               
               (define sub-val (car (generate-temporaries '(struct/dc))))
               
-              (define this-optres (opt/i (opt/info-change-val sub-val opt/info) exp))
+              (define this-optres (opt/i 
+                                   (opt/info-add-blame-context 
+                                    (opt/info-change-val sub-val opt/info)
+                                    (λ (blame-stx)
+                                      #`(blame-add-struct-context #,blame-stx '#,sel-name)))
+                                   exp))
               
               (define sel-id (name->sel-id #'struct-id sel-name))
               
@@ -1011,6 +1016,9 @@
              #:stronger-ribs stronger-ribs
              #:chaperone #t
              #:no-negative-blame? no-negative-blame))]))]))
+
+(define (blame-add-struct-context blame fld)
+  (blame-add-context blame (format "the ~a field of" fld)))
 
 (define (struct/dc-error blame obj what)
   (raise-blame-error blame obj 

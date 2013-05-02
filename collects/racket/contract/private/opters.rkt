@@ -59,7 +59,11 @@
                               no-negative-blame
                               (reverse names))]
           [else
-           (define ps-optres (opt/i opt/info (car ps)))
+           (define ps-optres (opt/i (opt/info-add-blame-context
+                                     opt/info
+                                     (λ (blame-stx)
+                                       #`(blame-add-or-context #,blame-stx)))
+                                    (car ps)))
            (if (optres-flat ps-optres)
                (loop (cdr ps)
                      (cons (optres-flat ps-optres) next-ps)
@@ -109,7 +113,8 @@
                  val
                  (raise-blame-error blame
                                     val
-                                    "none of the branches of the or/c matched"))))]
+                                    '("none of the branches of the or/c matched" given: "~e")
+                                    val))))]
          [(= (length hos) 1)
           (with-syntax ([ho-ctc ho-ctc]
                         [val (opt/info-val opt/info)])
@@ -305,8 +310,16 @@
 
 (define/opter (cons/c opt/i opt/info stx)
   (define (opt/cons-ctc hdp tlp)
-    (define optres-hd (opt/i opt/info hdp))
-    (define optres-tl (opt/i opt/info tlp))
+    (define optres-hd (opt/i (opt/info-add-blame-context 
+                              opt/info 
+                              (λ (stx)
+                                #`(blame-add-car-context #,stx)))
+                             hdp))
+    (define optres-tl (opt/i (opt/info-add-blame-context 
+                              opt/info 
+                              (λ (stx)
+                                #`(blame-add-cdr-context #,stx)))
+                             tlp))
     (with-syntax ((check (with-syntax ((val (opt/info-val opt/info)))
                            (syntax (pair? val)))))
       (build-optres
@@ -319,12 +332,8 @@
          (syntax (if check
                      (cons (let ((val (car val))) next-hdp)
                            (let ((val (cdr val))) next-tlp))
-                     (raise-blame-error
-                      blame
-                      val
-                      '(expected: "~s" given: "~e")
-                      (contract-name ctc)
-                      val))))
+                     (raise-not-cons-blame-error
+                      blame val))))
        #:lifts
        (append (optres-lifts optres-hd) (optres-lifts optres-tl))
        #:superlifts
@@ -351,7 +360,12 @@
     [(_ hdp tlp) (opt/cons-ctc #'hdp #'tlp)]))
 
 (define-for-syntax (opt/listof-ctc content non-empty? opt/i opt/info)
-  (define optres-ele (opt/i opt/info content))
+  (define optres-ele (opt/i 
+                      (opt/info-add-blame-context 
+                       opt/info
+                       (λ (blame-stx)
+                         #`(blame-add-element-context #,blame-stx))) 
+                      content))
   (with-syntax ([check (with-syntax ((val (opt/info-val opt/info)))
                          (if non-empty?
                              #'(and (list? val) (pair? val))
@@ -398,6 +412,9 @@
                            'non-empty-listof
                            'listof)
                     #,(optres-name optres-ele)))))
+
+(define (blame-add-element-context blame)
+  (blame-add-context blame "an element of"))
 
 (define/opter (listof opt/i opt/info stx)
   (syntax-case stx ()
@@ -464,7 +481,8 @@
                               [partials-doms null]
                               [stronger-ribs null]
                               [chaperone? #t]
-                              [dom-names '()])
+                              [dom-names '()]
+                              [arg-num 1])
                      (cond
                        [(null? doms) (values (reverse next-doms)
                                              lifts-doms
@@ -474,7 +492,11 @@
                                              chaperone?
                                              (reverse dom-names))]
                        [else
-                        (define optres-dom (opt/i (opt/info-swap-blame opt/info) (car doms)))
+                        (define optres-dom (opt/i (opt/info-add-blame-context 
+                                                   (opt/info-swap-blame opt/info)
+                                                   (λ (blame-stx)
+                                                     #`(blame-add-nth-arg-context #,blame-stx #,arg-num)))
+                                                  (car doms)))
                         (loop (cdr vars)
                               (cdr doms)
                               (cons (with-syntax ((next (optres-exp optres-dom))
@@ -487,7 +509,8 @@
                               (append partials-doms (optres-partials optres-dom))
                               (append (optres-stronger-ribs optres-dom) stronger-ribs)
                               (combine-two-chaperone?s chaperone? (optres-chaperone optres-dom))
-                              (cons (optres-name optres-dom) dom-names))]))]
+                              (cons (optres-name optres-dom) dom-names)
+                              (+ arg-num 1))]))]
                   [(next-rngs lifts-rngs superlifts-rngs partials-rngs stronger-ribs-rng rng-chaperone? rng-names)
                    (let loop ([vars rng-vars]
                               [rngs rngs]
@@ -507,7 +530,12 @@
                                              chaperone?
                                              (reverse rng-names))]
                        [else
-                        (define optres-rng (opt/i opt/info (car rngs)))
+                        (define optres-rng (opt/i 
+                                            (opt/info-add-blame-context 
+                                             opt/info
+                                             (λ (blame-stx)
+                                               #`(blame-add-range-context #,blame-stx)))
+                                            (car rngs)))
                         (loop (cdr vars)
                               (cdr rngs)
                               (cons (with-syntax ((next (optres-exp optres-rng))
@@ -529,27 +557,39 @@
                      ((next-dom ...) next-doms)
                      (dom-len (length dom-vars))
                      (rng-len (length rng-vars))
-                     ((next-rng ...) next-rngs))
+                     ((next-rng ...) next-rngs)
+                     [(dom-vars ...) (generate-temporaries dom-vars)]
+                     [(cont-mark-value) (generate-temporaries '(cont-mark-value))])
          (define (values/maybe-one stx)
            (syntax-case stx ()
              [(x) #'x]
              [(x ...) #'(values x ...)]))
-         #`(let ([exact-proc (case-lambda
-                               [(dom-arg ...)
-                                (values
-                                 (case-lambda
-                                   [(rng-arg ...)
-                                    #,(values/maybe-one #'(next-rng ...))]
-                                   [args 
-                                    (bad-number-of-results blame val rng-len args)])
-                                 next-dom ...)]
-                               [args
-                                (bad-number-of-arguments blame val args dom-len)])])
+         #`(let* ([cont-mark-value (cons #,(opt/info-positive-blame opt/info) '#,rngs)]
+                  [exact-proc (case-lambda
+                                [(dom-arg ...)
+                                 (let-values ([(rng-checker dom-vars ...)
+                                               (values (case-lambda
+                                                         [(rng-arg ...)
+                                                          #,(values/maybe-one #'(next-rng ...))]
+                                                         [args 
+                                                          (bad-number-of-results blame val rng-len args)])
+                                                       next-dom ...)])
+                                   (call-with-immediate-continuation-mark
+                                    opt->/c-cm-key 
+                                    (λ (mark-value)
+                                      (if (equal? mark-value cont-mark-value)
+                                          (values dom-vars ...)
+                                          (values rng-checker
+                                                  dom-vars ...)))))]
+                                [args
+                                 (bad-number-of-arguments blame val args dom-len)])])
              (if (and (procedure? val)
                       (equal? dom-len (procedure-arity val))
                       (let-values ([(a b) (procedure-keywords val)])
                         (null? b)))
-                 (chaperone-procedure val exact-proc)
+                 (chaperone-procedure val exact-proc
+                                      impersonator-prop:application-mark 
+                                      (cons opt->/c-cm-key cont-mark-value))
                  (handle-non-exact-procedure val dom-len blame exact-proc))))
        (append lifts-doms lifts-rngs)
        (append superlifts-doms superlifts-rngs)
@@ -575,7 +615,8 @@
                               [partials-doms null]
                               [stronger-ribs null]
                               [chaperone? #t]
-                              [names '()])
+                              [names '()]
+                              [arg-num 1])
                      (cond
                        [(null? doms) (values (reverse next-doms)
                                              lifts-doms
@@ -585,7 +626,11 @@
                                              chaperone?
                                              (reverse names))]
                        [else
-                        (define optres-dom (opt/i (opt/info-swap-blame opt/info) (car doms)))
+                        (define optres-dom (opt/i (opt/info-add-blame-context 
+                                                   (opt/info-swap-blame opt/info)
+                                                   (λ (blame-stx)
+                                                     #`(blame-add-nth-arg-context #,blame-stx #,arg-num)))
+                                                  (car doms)))
                         (loop (cdr vars)
                               (cdr doms)
                               (cons #`(let ([#,(opt/info-val opt/info) #,(car vars)]) #,(optres-exp optres-dom))
@@ -595,7 +640,8 @@
                               (append partials-doms (optres-partials optres-dom))
                               (append (optres-stronger-ribs optres-dom) stronger-ribs)
                               (combine-two-chaperone?s chaperone? (optres-chaperone optres-dom))
-                              (cons (optres-name optres-dom) names))]))])
+                              (cons (optres-name optres-dom) names)
+                              (+ arg-num 1))]))])
       (values
        (with-syntax ((blame (opt/info-blame opt/info))
                      ((dom-arg ...) dom-vars)
@@ -674,6 +720,15 @@
                              #:flat flat #:opt opt #:stronger-ribs stronger-ribs #:chaperone chaperone?
                              #:name name)
                (opt/unknown opt/i opt/info stx))))]))
+
+(define opt->/c-cm-key (gensym 'opt->/c-cm-key))
+
+(define (blame-add-nth-arg-context blame n)
+  (blame-add-context blame
+                     (format "the ~a argument of" (n->th n))))
+(define (blame-add-range-context blame)
+  (blame-add-context blame
+                     "the range of"))
 
 (define/opter (predicate/c opt/i opt/info stx) (predicate/c-optres opt/info))
 

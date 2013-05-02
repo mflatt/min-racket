@@ -14,14 +14,13 @@
     (define installation? (eq? 'installation (current-pkg-scope)))
     (setup:setup
      #:make-user? (not installation?)
+     #:avoid-main? (not installation?)
      #:collections (and setup-collects
                         (map (lambda (s)
                                (if (list? s) s (list s)))
-                             (append setup-collects
-                                     (if installation? '("scribblings/main") null)
-                                     '("scribblings/main/user"))))
+                             setup-collects))
      #:tidy? #t
-     #:avoid-main? (not installation?))))
+     #:make-doc-index? #t)))
 
 (define ((pkg-error cmd) . args)
   (apply raise-user-error
@@ -232,6 +231,7 @@
   #:once-each
   [#:bool all () "Show all packages"]
   [#:bool only-names () "Show only package names"]
+  [#:bool modules () "Show implemented modules"]
   #:args pkg-name
   (when (and all (pair? pkg-name))
     ((pkg-error 'catalog-show) "both `--all' and package names provided"))
@@ -240,7 +240,8 @@
                  [current-pkg-error (pkg-error 'catalog-show)])
     (pkg-catalog-show pkg-name 
                       #:all? all
-                      #:only-names? only-names))]
+                      #:only-names? only-names
+                      #:modules? modules))]
  [catalog-copy
   "Copy/merge package name catalogs"
   #:once-each
