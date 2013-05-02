@@ -82,7 +82,6 @@ plain-install:
 install-common-first:
 	mkdir -p $(ALLDIRINFO)
 	@RUN_RACKET_CGC@ -c "$(srcdir)/get-libs.rkt" core @DIRCVTPRE@"$(DESTDIR)$(libpltdir)"@DIRCVTPOST@
-	@RUN_RACKET_CGC@ -c "$(srcdir)/get-libs.rkt" math @DIRCVTPRE@"$(DESTDIR)$(libpltdir)"@DIRCVTPOST@
 	@RUN_RACKET_CGC@ -c "$(srcdir)/get-libs.rkt" db @DIRCVTPRE@"$(DESTDIR)$(libpltdir)"@DIRCVTPOST@
 	@RUN_RACKET_CGC@ -c "$(srcdir)/get-libs.rkt" com @DIRCVTPRE@"$(DESTDIR)$(libpltdir)"@DIRCVTPOST@
 
